@@ -17,6 +17,7 @@
 #include "map.h"
 #include "set.h"
 #include "lexicon.h"
+#include "cube.h"
 using namespace std;
 
 static const string kStandardCubes[16] = {
@@ -47,7 +48,7 @@ static void giveInstructions();
 
 static int getPreferredBoardSize();
 
-Vector<string> copyBoggleBoard();
+Vector<string> copyBoggleBoard(const int dimension);
 
 static void playBoggle();
 
@@ -61,7 +62,13 @@ Grid<char> loadGrid(const Vector<string> vec, const int dimension);
 
 Grid<char> createBoggleGrid(const int dimension);
 
-void findAllAnswers(Grid<char>& bog);
+void findAllAnswers(const Lexicon& english, Grid<char>& bog, Set<string>& bank, Map<string, Vector<block>>& answerMap);
+
+void traceWord(Grid<char>& bog, int row, int col, string& word, Grid<bool>& visited, const Lexicon& english, Set<string>& bank, Map<string, Vector<block>>& answerMap, Vector<block>& wordMap);
+
+static string getWord(const string& prompt);
+
+int checkAnswer(Map<string, Vector<block>>& answerMap, const string word);
 
 /**
  * Function: main
@@ -73,7 +80,6 @@ int main() {
     initGBoggle(gw);
     welcome();
     if (getYesOrNo("Do you need instructions?")) giveInstructions();
-    // playBoggle();
 
     do {
         playBoggle();
@@ -82,6 +88,58 @@ int main() {
     cout << "Thank you for playing!" << endl;
     shutdownGBoggle();
     return 0;
+}
+
+/**
+ * Function: playBoggle
+ * --------------------
+ * Manages all details needed for the user to play one
+ * or more games of Boggle.
+ */
+static void playBoggle() {
+    int dimension = getPreferredBoardSize();
+    Lexicon english(kEnglishLanguageDatafile);
+    // Initialize a blank board.
+    drawBoard(dimension, dimension);
+
+    Grid<char> boggleGrid = createBoggleGrid(dimension);
+
+    drawShuffleBoard(boggleGrid);
+
+    Set<string> bank;
+    Map<string, Vector<block>> answerMap;
+    findAllAnswers(english, boggleGrid, bank, answerMap);
+    int score = 0;
+    while (true) {
+        string word = getWord("Answers: (Press enter to quit) ");
+        if (word == "")
+            break;
+        // word = toUpperCase(word);
+        score += checkAnswer(answerMap, toUpperCase(word));
+    }
+    cout << endl << "Player's score: " << score << endl;
+}
+
+/**
+ * Function: checkAnswer
+ * Check if player's word is in answer bank,
+ * Highlight on board if yes and return 1 point.
+ */
+int checkAnswer(Map<string, Vector<block>>& answerMap, const string word) {
+    if (answerMap.containsKey(word)) {
+        Vector<block> wordMap = answerMap[word];
+        for (int i = 0; i < wordMap.size(); ++i) {
+            highlightCube(wordMap[i].row, wordMap[i].col, true);
+        }
+        pause(10000);
+        for (int i = 0; i < wordMap.size(); ++i) {
+            highlightCube(wordMap[i].row, wordMap[i].col, false);
+        }
+        return 1;
+    }
+    else {
+        return 0;
+    }
 }
 
 /**
@@ -102,31 +160,20 @@ static int getPreferredBoardSize() {
  * into Vector<string> so it
  * can be manipulated
  */
-Vector<string> copyBoggleBoard() {
+Vector<string> copyBoggleBoard(const int dimension) {
     Vector<string> vec;
-    for (int i = 0; i < 16; ++i) {
-        vec.add(kStandardCubes[i]);
+    if (dimension == 4) {
+        for (int i = 0; i < 16; ++i) {
+            vec.add(kStandardCubes[i]);
+        }
     }
+    else {
+        for (int i = 0; i < 25; ++i) {
+            vec.add(kBigBoggleCubes[i]);
+        }
+    }
+
     return vec;
-}
-
-/**
- * Function: playBoggle
- * --------------------
- * Manages all details needed for the user to play one
- * or more games of Boggle.
- */
-static void playBoggle() {
-    int dimension = getPreferredBoardSize();
-
-    // Initialize a blank board.
-    drawBoard(dimension, dimension);
-
-    Grid<char> boggleGrid = createBoggleGrid(dimension);
-
-    drawShuffleBoard(boggleGrid);
-
-    findAllAnswers(boggleGrid);
 }
 
 /**
@@ -245,7 +292,7 @@ void drawShuffleBoard(Grid<char>& loadGrid) {
  */
 Grid<char> createBoggleGrid(const int dimension) {
     // Create vector object to represent boggle blocks.
-    Vector<string> vec = copyBoggleBoard();
+    Vector<string> vec = copyBoggleBoard(dimension);
 
     // Shuffle the blocks and roll the blocks for the gameboard.
     shuffleBoggleBoard(vec);
@@ -254,16 +301,66 @@ Grid<char> createBoggleGrid(const int dimension) {
     return loadGrid(vec, dimension);
 }
 
-void findAllAnswers(Grid<char>& bog) {
-    for (int r = 0; r < bog.numRows(); ++r) {
-        for (int c = 0; c < bog.numCols(); ++c) {
-            for (int a = r-1; a < r+2; ++a) {
-                for (int b = c-1; b < c+2; ++b) {
-                    cout << "R: " << r << "C: " << c << endl;
-                    cout << "A: " << a << "B: " << b << endl;
+/**
+ * Function: findAllAnswers
+ * ------------------------
+ * Find all possible solutions to boggle board
+ * and save in a vector or word-bank.
+ */
+void findAllAnswers(const Lexicon& english, Grid<char>& bog, Set<string>& bank, Map<string, Vector<block>>& answerMap) {
+    // Starting at [0,0], look for all possible word built of that letter
+    int nRows = bog.numRows();
+    int nCols = bog.numCols();
+    Grid<bool> visited(nRows, nCols, false);
+    string word;
+    Vector<block> wordMap;
+
+    for (int r = 0; r < nRows; ++r) {
+        for (int c = 0; c < nCols; ++c) {
+            traceWord(bog, r, c, word, visited, english, bank, answerMap, wordMap);
+        }
+    }
+    cout << bank.toString() << endl;
+}
+
+/**
+ * Function: traceWord
+ * Build words based on the letters of the boggle board
+ */
+void traceWord(Grid<char>& bog, int row, int col, string& word, Grid<bool>& visited, const Lexicon& english, Set<string>& bank, Map<string, Vector<block>>& answerMap, Vector<block>& wordMap) {
+    word += bog.get(row,col);
+    block b;
+    b.row = row;
+    b.col = col;
+    b.letter = bog.get(row,col);
+    wordMap.add(b);
+    visited.set(row,col,true);
+    if (word.length() >= 4 && english.contains(word) && !bank.contains(word)) {
+        bank.add(word);
+        answerMap.put(word, wordMap);
+    }
+    for (int a = row-1; a < row+2; ++a) {
+        for (int b = col-1; b < col+2; ++b) {
+            if (bog.inBounds(a,b) && english.containsPrefix(word)) {
+                if (!visited.get(a,b)) {
+                    traceWord(bog, a, b, word, visited, english, bank, answerMap, wordMap);
                 }
             }
         }
+    }
+    word.erase(word.length()-1);
+    visited.set(row,col,false);
+    wordMap.remove(wordMap.size()-1);
+}
+
+/**
+ * Function: getWord
+ * Get words from user to check against the boggle board.
+ */
+static string getWord(const string& prompt) {
+    while (true) {
+        string response = trim(getLine(prompt));
+        return response;
     }
 }
 
